@@ -1,0 +1,27 @@
+{
+	"name": "discord-twitch-live-screenshot",
+	"module": "src/main.ts",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"start": "bun run src/main.ts",
+		"dev": "bun --watch run src/main.ts",
+		"deploy-commands": "bun run src/infrastructure/discord/deploy-commands.ts",
+		"typecheck": "tsc --noEmit",
+		"codecheck": "biome check",
+		"codecheck:fix": "biome check --fix",
+		"test": "bun test"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.1",
+		"@types/bun": "latest"
+	},
+	"peerDependencies": {
+		"typescript": "^6"
+	},
+	"dependencies": {
+		"discord.js": "^14.26.4",
+		"pino": "^10.3.1",
+		"pino-pretty": "^13.1.3"
+	}
+}
