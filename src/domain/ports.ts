@@ -32,6 +32,16 @@ export interface ResolvedStream {
 export interface StreamResolver {
 	/** @returns the source-quality playlist URL and best-effort metadata. */
 	resolve(channel: TwitchChannel): Promise<ResolvedStream>;
+
+	/**
+	 * Inspect the source media playlist for an in-progress stitched ad break
+	 * (a mid-roll). A frame grabbed during one would be the ad, not the stream.
+	 *
+	 * @param sourceUrl a source variant playlist URL from {@link resolve}.
+	 * @returns true if an ad is currently stitched into the playlist. Best-effort:
+	 *   on any fetch/parse failure, resolves to `false` so capture proceeds.
+	 */
+	checkAdBreak(sourceUrl: string): Promise<boolean>;
 }
 
 /** Captures a single frame from an HLS stream URL and returns the encoded image. */

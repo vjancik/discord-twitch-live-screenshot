@@ -4,6 +4,7 @@ import {
 	RetrievalError,
 } from "../../domain/errors";
 import {
+	hasAdBreak,
 	parseMasterPlaylist,
 	selectSourceVariant,
 } from "../../domain/playlist";
@@ -115,6 +116,27 @@ export class TwitchGqlResolver implements StreamResolver {
 		return { sourceUrl: variant.url, metadata };
 	}
 
+	async checkAdBreak(sourceUrl: string): Promise<boolean> {
+		try {
+			// Cache-bust so we observe the live edge, not a stale window: a media
+			// playlist URL is otherwise served from cache for its target duration.
+			const url = new URL(sourceUrl);
+			url.searchParams.set("_", String(Date.now()));
+			const res = await this.fetchImpl(url.toString(), {
+				headers: { "User-Agent": USER_AGENT },
+			});
+			if (!res.ok) return false;
+			return hasAdBreak(await res.text());
+		} catch (err) {
+			// Best-effort: any failure must not block the screenshot pipeline.
+			this.logger.debug(
+				{ err },
+				"Ad-break check failed (non-fatal); assuming no ad",
+			);
+			return false;
+		}
+	}
+
 	/**
 	 * Best-effort fetch of decorative broadcast metadata. Never throws: any
 	 * failure (network, schema drift, missing fields) resolves to `undefined` so
@@ -174,7 +196,11 @@ export class TwitchGqlResolver implements StreamResolver {
 				login: channel.login,
 				isVod: false,
 				vodID: "",
-				playerType: "site",
+				// "embed" (streamlink's default) yields an ad-free playlist for
+				// anonymous clients, whereas "site" gets a stitched preroll that
+				// cannot be waited out — each session re-mints a fresh one. Verified
+				// live: "embed" → no twitch-stitched-ad marker, "site" → preroll.
+				playerType: "embed",
 			},
 		};
 

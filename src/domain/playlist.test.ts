@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { RetrievalError } from "./errors";
-import { parseMasterPlaylist, selectSourceVariant } from "./playlist";
+import {
+	hasAdBreak,
+	parseMasterPlaylist,
+	selectSourceVariant,
+} from "./playlist";
 
 const SAMPLE = `#EXTM3U
 #EXT-X-TWITCH-INFO:NODE="..."
@@ -58,5 +62,24 @@ describe("selectSourceVariant", () => {
 		// Only audio remains -> pool falls back to it, but it has no resolution.
 		const variant = selectSourceVariant(audioOnly);
 		expect(variant.groupId).toBe("audio_only");
+	});
+});
+
+describe("hasAdBreak", () => {
+	test("detects a stitched-ad daterange", () => {
+		const playlist = `#EXTM3U
+#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-06-29T09:00:00.000Z",DURATION=30.000
+#EXT-X-DISCONTINUITY
+#EXTINF:2.0,
+https://example.ttvnw.net/ad-seg.ts`;
+		expect(hasAdBreak(playlist)).toBe(true);
+	});
+
+	test("returns false for a clean playlist", () => {
+		const playlist = `#EXTM3U
+#EXT-X-DATERANGE:ID="session-1",CLASS="twitch-session",START-DATE="2026-06-29T09:00:00.000Z"
+#EXTINF:2.0,
+https://example.ttvnw.net/seg.ts`;
+		expect(hasAdBreak(playlist)).toBe(false);
 	});
 });

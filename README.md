@@ -21,6 +21,11 @@ It re-implements Twitch's anonymous GraphQL access-token negotiation directly.
   the source URL via a second inline GQL query (no `sha256Hash` to maintain),
   concurrently so it adds ~no latency. Metadata is best-effort: if the fetch
   fails the screenshot still posts, just without the title/details.
+- **Ad handling** — the access token uses `playerType: "embed"`, which yields an
+  ad-free playlist for anonymous clients (the `"site"`/`"web"` player gets an
+  unskippable stitched preroll). If a (rare) mid-roll is nonetheless detected in
+  the playlist, the bot reports **"Commercial ad break in progress"** once
+  instead of capturing the ad creative — it does not wait or retry.
 - **Audit logging** — auth-contract failures are posted to a configured
   `AUDIT_CHANNEL`, as is the first success after a failure (a "recovery").
 - **Embed suppression** (optional, off by default) — Discord auto-unfurls a Twitch
@@ -40,7 +45,10 @@ the `chunked` (source) variant → `ffmpeg` grabs one native-resolution frame as
 2. **Playlist** — `GET https://usher.ttvnw.net/api/channel/hls/<channel>.m3u8` with
    the signed `token`/`sig`. A `200` returns the master playlist (the channel is
    live); a `404`/`403` with an offline marker means the channel is offline.
-3. **Frame** — `ffmpeg -i <source-variant> -frames:v 1 -c:v png` → lossless PNG at
+3. **Ad check** — the chosen source media playlist is fetched once and scanned for
+   a `twitch-stitched-ad` daterange. If present (a mid-roll), the bot reports the
+   ad and skips the grab. The `embed` player type keeps this rare.
+4. **Frame** — `ffmpeg -i <source-variant> -frames:v 1 -c:v png` → lossless PNG at
    the stream's native resolution.
 
 ### Why there is no sha256Hash to maintain

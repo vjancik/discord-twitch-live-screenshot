@@ -210,3 +210,43 @@ describe("TwitchGqlResolver", () => {
 		);
 	});
 });
+
+describe("TwitchGqlResolver.checkAdBreak", () => {
+	const AD = `#EXTM3U\n#EXT-X-DATERANGE:ID="a",CLASS="twitch-stitched-ad",START-DATE="2026-06-29T09:00:00.000Z"`;
+	const CLEAN = `#EXTM3U\n#EXTINF:2.0,\nhttps://x/seg.ts`;
+
+	test("true when the playlist has a stitched-ad daterange", async () => {
+		const resolver = new TwitchGqlResolver(noopLogger, (async () =>
+			textResponse(200, AD)) as unknown as typeof fetch);
+		expect(await resolver.checkAdBreak("https://x/source.m3u8")).toBe(true);
+	});
+
+	test("false for a clean playlist", async () => {
+		const resolver = new TwitchGqlResolver(noopLogger, (async () =>
+			textResponse(200, CLEAN)) as unknown as typeof fetch);
+		expect(await resolver.checkAdBreak("https://x/source.m3u8")).toBe(false);
+	});
+
+	test("false (best-effort) on a non-OK playlist fetch", async () => {
+		const resolver = new TwitchGqlResolver(noopLogger, (async () =>
+			textResponse(500, "boom")) as unknown as typeof fetch);
+		expect(await resolver.checkAdBreak("https://x/source.m3u8")).toBe(false);
+	});
+
+	test("false (best-effort) on a network error", async () => {
+		const resolver = new TwitchGqlResolver(noopLogger, (async () => {
+			throw new Error("network down");
+		}) as unknown as typeof fetch);
+		expect(await resolver.checkAdBreak("https://x/source.m3u8")).toBe(false);
+	});
+
+	test("cache-busts the playlist url with a query param", async () => {
+		let seenUrl = "";
+		const resolver = new TwitchGqlResolver(noopLogger, (async (u: string) => {
+			seenUrl = u;
+			return textResponse(200, CLEAN);
+		}) as unknown as typeof fetch);
+		await resolver.checkAdBreak("https://x/source.m3u8");
+		expect(seenUrl).toMatch(/[?&]_=\d+/);
+	});
+});

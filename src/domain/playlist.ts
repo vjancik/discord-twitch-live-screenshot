@@ -75,6 +75,21 @@ export function parseMasterPlaylist(playlist: string): StreamVariant[] {
 	return variants;
 }
 
+/** HLS daterange CLASS Twitch uses to mark a stitched commercial. */
+const STITCHED_AD_CLASS = 'CLASS="twitch-stitched-ad"';
+
+/**
+ * Whether a Twitch source *media* playlist currently contains a stitched ad.
+ *
+ * Twitch marks an ad window with an `#EXT-X-DATERANGE` line carrying
+ * `CLASS="twitch-stitched-ad"`. A frame grabbed while one is present is the ad
+ * creative, not the stream. We use `playerType: "embed"` to avoid prerolls, so
+ * this is a rare-case mid-roll detector rather than the norm.
+ */
+export function hasAdBreak(mediaPlaylist: string): boolean {
+	return mediaPlaylist.includes(STITCHED_AD_CLASS);
+}
+
 /**
  * Select the best video variant for a source-quality screenshot.
  *

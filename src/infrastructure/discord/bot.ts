@@ -22,7 +22,7 @@ import {
 import type { Logger } from "../../domain/ports";
 import { TwitchChannel } from "../../domain/twitch-channel";
 import { COMMAND_NAME, OPTION_CHANNEL_URL } from "./command";
-import { formatLiveHeadline } from "./live-headline";
+import { formatAdBreakNotice, formatLiveHeadline } from "./live-headline";
 import { extractChannels } from "./url-extractor";
 
 /** Generic, user-facing message shown when retrieval fails for any reason. */
@@ -168,6 +168,11 @@ export class DiscordBot {
 					files: [toAttachment(channel.login, result.image)],
 				});
 				return;
+			case "ad":
+				await interaction.editReply(
+					formatAdBreakNotice(channel.login, result.metadata, channel.url),
+				);
+				return;
 			case "offline":
 				await interaction.editReply(
 					`💤 **${channel.login}** isn't live right now.`,
@@ -286,6 +291,21 @@ export class DiscordBot {
 					);
 					return false;
 				}
+			case "ad":
+				// Commercial break: report once, no screenshot. Returns false so it
+				// does NOT trigger embed suppression (we only suppress on a real shot).
+				try {
+					await message.reply({
+						content: formatAdBreakNotice(result.channel, result.metadata),
+						allowedMentions: { repliedUser: false, parse: [] },
+					});
+				} catch (err) {
+					this.logger.error(
+						{ err: describeSendError(err), channel: result.channel },
+						"Failed to send ad-break notice",
+					);
+				}
+				return false;
 			case "offline":
 				// Channel not live → do nothing, per spec.
 				return false;

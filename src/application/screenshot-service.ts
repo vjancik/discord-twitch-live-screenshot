@@ -22,6 +22,12 @@ export type CaptureResult =
 			/** Best-effort broadcast metadata (title/game/viewers); may be undefined. */
 			metadata?: StreamMetadata;
 	  }
+	| {
+			/** A commercial break is in progress; no screenshot was grabbed. */
+			status: "ad";
+			channel: string;
+			metadata?: StreamMetadata;
+	  }
 	| { status: "offline"; channel: string }
 	| { status: "auth_failure"; channel: string }
 	| { status: "error"; channel: string };
@@ -49,6 +55,11 @@ export class ScreenshotService implements ScreenshotCapturer {
 	/**
 	 * Capture a source-quality frame for the given channel.
 	 *
+	 * If a commercial break is in progress (a mid-roll — prerolls are avoided via
+	 * `playerType: "embed"`), returns `{ status: "ad" }` instead of grabbing a
+	 * frame, since the frame would be the ad creative. We report it once and do
+	 * not wait or retry.
+	 *
 	 * Never throws: every failure mode is mapped to a {@link CaptureResult} so
 	 * callers (slash command, auto-embed) can decide presentation. Detailed
 	 * diagnostics are logged; auth failures are additionally audited.
@@ -57,6 +68,14 @@ export class ScreenshotService implements ScreenshotCapturer {
 		const log = this.logger.child({ channel: channel.login });
 		try {
 			const { sourceUrl, metadata } = await this.resolver.resolve(channel);
+
+			if (await this.resolver.checkAdBreak(sourceUrl)) {
+				log.info("Commercial break in progress; reporting without a frame");
+				// Resolving the stream proves the auth contract works.
+				await this.markHealthy(channel);
+				return { status: "ad", channel: channel.login, metadata };
+			}
+
 			const image = await this.grabber.grabFrame(sourceUrl);
 			log.info({ bytes: image.byteLength }, "Captured screenshot");
 			await this.markHealthy(channel);

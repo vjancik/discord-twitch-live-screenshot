@@ -28,12 +28,15 @@ const IMAGE = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
 function build(overrides: {
 	resolve?: StreamResolver["resolve"];
+	checkAdBreak?: StreamResolver["checkAdBreak"];
 	grab?: FrameGrabber["grabFrame"];
 }) {
 	const resolver: StreamResolver = {
 		resolve:
 			overrides.resolve ??
 			mock(async () => ({ sourceUrl: "https://example/source.m3u8" })),
+		// Default: no ad in progress.
+		checkAdBreak: overrides.checkAdBreak ?? mock(async () => false),
 	};
 	const grabber: FrameGrabber = {
 		grabFrame: overrides.grab ?? mock(async () => IMAGE),
@@ -43,7 +46,7 @@ function build(overrides: {
 		reportRecovery: mock(async () => {}),
 	};
 	const service = new ScreenshotService(resolver, grabber, audit, noopLogger);
-	return { service, audit };
+	return { service, audit, grabber };
 }
 
 describe("ScreenshotService.capture", () => {
@@ -70,6 +73,34 @@ describe("ScreenshotService.capture", () => {
 			status: "ok",
 			metadata: { title: "hi", game: "Chess", viewersCount: 7 },
 		});
+	});
+
+	test("returns ad (no frame grabbed) when a commercial break is in progress", async () => {
+		const grab = mock(async () => IMAGE);
+		const { service } = build({
+			checkAdBreak: mock(async () => true),
+			grab,
+			resolve: async () => ({
+				sourceUrl: "https://example/source.m3u8",
+				metadata: { title: "live title" },
+			}),
+		});
+		const result = await service.capture(channel);
+		expect(result).toEqual({
+			status: "ad",
+			channel: "somechannel",
+			metadata: { title: "live title" },
+		});
+		// Crucially, no frame is grabbed during an ad.
+		expect(grab).not.toHaveBeenCalled();
+	});
+
+	test("grabs the frame normally when no ad is in progress", async () => {
+		const grab = mock(async () => IMAGE);
+		const { service } = build({ checkAdBreak: mock(async () => false), grab });
+		const result = await service.capture(channel);
+		expect(result.status).toBe("ok");
+		expect(grab).toHaveBeenCalledTimes(1);
 	});
 
 	test("returns offline (no audit) when channel is offline", async () => {

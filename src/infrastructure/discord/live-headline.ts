@@ -44,3 +44,17 @@ export function formatLiveHeadline(
 		? `${headline}\n-# ${details.join(" · ")}`
 		: headline;
 }
+
+/**
+ * Render the one-off notice shown when a channel is in a commercial break, so
+ * no screenshot could be grabbed. Reuses {@link formatLiveHeadline} and appends
+ * a single ad-break line. There is no timer and no follow-up — we report it once.
+ */
+export function formatAdBreakNotice(
+	channelLogin: string,
+	metadata: StreamMetadata | undefined,
+	link?: string,
+): string {
+	const headline = formatLiveHeadline(channelLogin, metadata, link);
+	return `${headline}\n⚠️ Commercial ad break in progress`;
+}

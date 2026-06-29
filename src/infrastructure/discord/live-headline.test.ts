@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatLiveHeadline } from "./live-headline";
+import { formatAdBreakNotice, formatLiveHeadline } from "./live-headline";
 
 describe("formatLiveHeadline", () => {
 	test("bold slug, no link, with title and details", () => {
@@ -61,5 +61,27 @@ describe("formatLiveHeadline", () => {
 		expect(
 			formatLiveHeadline("foo", { title: "t", viewersCount: 1234567 }),
 		).toBe("📸 **foo** — t\n-# 1,234,567 viewers");
+	});
+});
+
+describe("formatAdBreakNotice", () => {
+	test("appends the ad-break line to the headline (no link)", () => {
+		expect(formatAdBreakNotice("foo", { title: "t" })).toBe(
+			"📸 **foo** — t\n⚠️ Commercial ad break in progress",
+		);
+	});
+
+	test("includes the linked slug for the slash command", () => {
+		expect(
+			formatAdBreakNotice("foo", { title: "t" }, "https://www.twitch.tv/foo"),
+		).toBe(
+			"📸 [**foo**](<https://www.twitch.tv/foo>) — t\n⚠️ Commercial ad break in progress",
+		);
+	});
+
+	test("works with the 'is live' fallback and detail line", () => {
+		expect(formatAdBreakNotice("foo", { game: "Chess", viewersCount: 5 })).toBe(
+			"📸 **foo** is live\n-# Chess · 5 viewers\n⚠️ Commercial ad break in progress",
+		);
 	});
 });
