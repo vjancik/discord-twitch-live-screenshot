@@ -1,0 +1,6 @@
+services:
+  bot:
+    build: .
+    image: discord-twitch-live-screenshot:latest
+    env_file: .env
+    restart: unless-stopped

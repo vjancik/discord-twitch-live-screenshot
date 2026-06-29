@@ -98,6 +98,25 @@ bun run start             # start the bot
 bun run dev               # start with --watch
 ```
 
+## Docker
+
+The image embeds a statically-linked `ffmpeg` build (from
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)), so the container
+needs no system ffmpeg and works out of the box. It is downloaded in an isolated
+build stage and copied to `/home/bun/.local/bin/ffmpeg`, which is on the
+runtime user's `PATH` — so the app's default `ffmpegPath` of `"ffmpeg"` resolves
+it with no `FFMPEG_PATH` override. Builds are multi-arch (`amd64` / `arm64`).
+
+```bash
+cp .env.example .env      # then fill in the values
+bun run local:prod:up     # docker compose up --build -d
+bun run local:prod:down   # docker compose down
+```
+
+The container runs the bot (`bun run start`). Slash-command registration
+(`deploy-commands`) is a one-time host task — run it once against your
+application before starting the container.
+
 ## Development
 
 ```bash

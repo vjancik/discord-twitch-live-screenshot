@@ -10,7 +10,9 @@
 		"typecheck": "tsc --noEmit",
 		"codecheck": "biome check",
 		"codecheck:fix": "biome check --fix",
-		"test": "bun test"
+		"test": "bun test",
+		"local:prod:up": "docker compose up --build -d",
+		"local:prod:down": "docker compose down"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.1",
