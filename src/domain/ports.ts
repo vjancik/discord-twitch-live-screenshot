@@ -1,6 +1,28 @@
 import type { TwitchChannel } from "./twitch-channel";
 
 /**
+ * Best-effort metadata about a live broadcast (title, category, viewers).
+ * Every field is optional: it is decorative, fetched alongside the source URL,
+ * and its absence must never block a screenshot.
+ */
+export interface StreamMetadata {
+	/** The current stream title (from the channel's last broadcast). */
+	title?: string;
+	/** The category / game display name. */
+	game?: string;
+	/** Current concurrent viewer count. */
+	viewersCount?: number;
+}
+
+/** A resolved live channel: the HLS source URL plus any best-effort metadata. */
+export interface ResolvedStream {
+	/** The source-quality media playlist URL for the live channel. */
+	sourceUrl: string;
+	/** Decorative broadcast metadata; undefined if the metadata fetch failed. */
+	metadata?: StreamMetadata;
+}
+
+/**
  * Resolves a live Twitch channel to a ready-to-consume HLS source variant URL.
  *
  * Implementations encapsulate the GQL auth + usher negotiation. They must throw
@@ -8,8 +30,8 @@ import type { TwitchChannel } from "./twitch-channel";
  * rejects the anonymous auth contract, and `RetrievalError` for other faults.
  */
 export interface StreamResolver {
-	/** @returns the source-quality media playlist URL for the live channel. */
-	resolveSourceUrl(channel: TwitchChannel): Promise<string>;
+	/** @returns the source-quality playlist URL and best-effort metadata. */
+	resolve(channel: TwitchChannel): Promise<ResolvedStream>;
 }
 
 /** Captures a single frame from an HLS stream URL and returns the encoded image. */

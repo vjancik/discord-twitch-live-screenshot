@@ -3,6 +3,7 @@ import type {
 	AuditLogger,
 	FrameGrabber,
 	Logger,
+	StreamMetadata,
 	StreamResolver,
 } from "../domain/ports";
 import type { TwitchChannel } from "../domain/twitch-channel";
@@ -14,7 +15,13 @@ export interface ScreenshotCapturer {
 
 /** Outcome of a screenshot capture attempt. */
 export type CaptureResult =
-	| { status: "ok"; image: Buffer; channel: string }
+	| {
+			status: "ok";
+			image: Buffer;
+			channel: string;
+			/** Best-effort broadcast metadata (title/game/viewers); may be undefined. */
+			metadata?: StreamMetadata;
+	  }
 	| { status: "offline"; channel: string }
 	| { status: "auth_failure"; channel: string }
 	| { status: "error"; channel: string };
@@ -49,11 +56,11 @@ export class ScreenshotService implements ScreenshotCapturer {
 	async capture(channel: TwitchChannel): Promise<CaptureResult> {
 		const log = this.logger.child({ channel: channel.login });
 		try {
-			const sourceUrl = await this.resolver.resolveSourceUrl(channel);
+			const { sourceUrl, metadata } = await this.resolver.resolve(channel);
 			const image = await this.grabber.grabFrame(sourceUrl);
 			log.info({ bytes: image.byteLength }, "Captured screenshot");
 			await this.markHealthy(channel);
-			return { status: "ok", image, channel: channel.login };
+			return { status: "ok", image, channel: channel.login, metadata };
 		} catch (err) {
 			return await this.handleFailure(channel, log, err);
 		}

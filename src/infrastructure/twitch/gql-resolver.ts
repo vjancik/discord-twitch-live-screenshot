@@ -7,7 +7,12 @@ import {
 	parseMasterPlaylist,
 	selectSourceVariant,
 } from "../../domain/playlist";
-import type { Logger, StreamResolver } from "../../domain/ports";
+import type {
+	Logger,
+	ResolvedStream,
+	StreamMetadata,
+	StreamResolver,
+} from "../../domain/ports";
 import type { TwitchChannel } from "../../domain/twitch-channel";
 
 /**
@@ -38,6 +43,16 @@ const USER_AGENT =
  */
 const ACCESS_TOKEN_QUERY = `query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {  streamPlaybackAccessToken(channelName: $login, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) {    value    signature    __typename  }  videoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) {    value    signature    __typename  }}`;
 
+/**
+ * Inline GraphQL query for decorative stream metadata (title/game/viewers).
+ *
+ * Like {@link ACCESS_TOKEN_QUERY}, this sends the query *string* rather than a
+ * persisted query, so there is no `sha256Hash` to keep in sync. Field names were
+ * verified against the live endpoint (`user.stream.viewersCount`, `game.displayName`,
+ * `lastBroadcast.title`). A null `stream` means offline.
+ */
+const STREAM_METADATA_QUERY = `query($login: String!) {  user(login: $login) {    lastBroadcast {      title    }    stream {      id      viewersCount      game {        displayName      }    }  }}`;
+
 interface PlaybackAccessToken {
 	value: string;
 	signature: string;
@@ -48,6 +63,18 @@ interface GqlResponse {
 		streamPlaybackAccessToken?: PlaybackAccessToken | null;
 	};
 	errors?: Array<{ message: string }>;
+}
+
+interface MetadataResponse {
+	data?: {
+		user?: {
+			lastBroadcast?: { title?: string | null } | null;
+			stream?: {
+				viewersCount?: number | null;
+				game?: { displayName?: string | null } | null;
+			} | null;
+		} | null;
+	};
 }
 
 /** Substrings in a usher error body that mean "channel is simply not live". */
@@ -67,8 +94,14 @@ export class TwitchGqlResolver implements StreamResolver {
 		private readonly fetchImpl: typeof fetch = fetch,
 	) {}
 
-	async resolveSourceUrl(channel: TwitchChannel): Promise<string> {
-		const token = await this.fetchAccessToken(channel);
+	async resolve(channel: TwitchChannel): Promise<ResolvedStream> {
+		// Fetch the signed token and the decorative metadata concurrently; both are
+		// independent POSTs to the same GQL endpoint, so the metadata costs ~0 added
+		// latency. Metadata is best-effort and never blocks the source resolution.
+		const [token, metadata] = await Promise.all([
+			this.fetchAccessToken(channel),
+			this.fetchStreamMetadata(channel),
+		]);
 		const playlist = await this.fetchPlaylist(channel, token);
 		const variant = selectSourceVariant(parseMasterPlaylist(playlist));
 		this.logger.debug(
@@ -79,7 +112,54 @@ export class TwitchGqlResolver implements StreamResolver {
 			},
 			"Selected source variant",
 		);
-		return variant.url;
+		return { sourceUrl: variant.url, metadata };
+	}
+
+	/**
+	 * Best-effort fetch of decorative broadcast metadata. Never throws: any
+	 * failure (network, schema drift, missing fields) resolves to `undefined` so
+	 * the screenshot pipeline is unaffected.
+	 */
+	private async fetchStreamMetadata(
+		channel: TwitchChannel,
+	): Promise<StreamMetadata | undefined> {
+		try {
+			const res = await this.fetchImpl(GQL_ENDPOINT, {
+				method: "POST",
+				headers: {
+					"Client-ID": CLIENT_ID,
+					"Content-Type": "text/plain;charset=UTF-8",
+					"User-Agent": USER_AGENT,
+				},
+				body: JSON.stringify({
+					query: STREAM_METADATA_QUERY,
+					variables: { login: channel.login },
+				}),
+			});
+			if (!res.ok) return undefined;
+
+			const json = (await res.json()) as MetadataResponse;
+			const user = json.data?.user;
+			if (!user) return undefined;
+
+			const title = user.lastBroadcast?.title ?? undefined;
+			const game = user.stream?.game?.displayName ?? undefined;
+			const viewersCount = user.stream?.viewersCount ?? undefined;
+			// Omit the object entirely if nothing useful came back.
+			if (
+				title === undefined &&
+				game === undefined &&
+				viewersCount === undefined
+			)
+				return undefined;
+			return { title, game, viewersCount };
+		} catch (err) {
+			this.logger.debug(
+				{ channel: channel.login, err },
+				"Stream metadata fetch failed (non-fatal)",
+			);
+			return undefined;
+		}
 	}
 
 	/** POST the inline GQL query and extract the signed token. */

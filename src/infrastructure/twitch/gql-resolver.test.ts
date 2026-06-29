@@ -33,24 +33,48 @@ function textResponse(status: number, body: string): Response {
 const VALID_TOKEN = {
 	data: { streamPlaybackAccessToken: { value: "v", signature: "s" } },
 };
+const METADATA = {
+	data: {
+		user: {
+			lastBroadcast: { title: "playing games" },
+			stream: { id: "1", viewersCount: 1234, game: { displayName: "Chess" } },
+		},
+	},
+};
 const MASTER_PLAYLIST = `#EXTM3U
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="chunked",NAME="1080p60 (source)"
 #EXT-X-STREAM-INF:BANDWIDTH=8579821,RESOLUTION=1920x1080,VIDEO="chunked"
 https://example.ttvnw.net/source.m3u8`;
 
-/** Build a fetch stub that returns the GQL response, then the usher response. */
-function stubFetch(gql: Response, usher?: Response): typeof fetch {
-	let call = 0;
-	return (async () => {
-		call += 1;
-		if (call === 1) return gql;
-		if (usher === undefined) throw new Error("unexpected second fetch");
+/** True if a GQL request body carries the access-token query. */
+function isTokenRequest(init?: RequestInit): boolean {
+	const body = typeof init?.body === "string" ? init.body : "";
+	return body.includes("PlaybackAccessToken_Template");
+}
+
+/**
+ * Build a fetch stub that routes by URL/body: the access-token GQL POST, the
+ * metadata GQL POST (same endpoint, different query), and the usher GET. The
+ * token and metadata calls race (Promise.all), so order is not guaranteed.
+ */
+function stubFetch(
+	gql: Response,
+	usher?: Response,
+	metadata: Response = jsonResponse(200, METADATA),
+): typeof fetch {
+	return (async (url: string, init?: RequestInit) => {
+		if (url.includes("gql.twitch.tv")) {
+			// `gql` is intended as the token response; route metadata separately, but
+			// re-clone so a test that asserts on the token error isn't masked.
+			return isTokenRequest(init) ? gql.clone() : metadata.clone();
+		}
+		if (usher === undefined) throw new Error("unexpected usher fetch");
 		return usher;
 	}) as unknown as typeof fetch;
 }
 
 describe("TwitchGqlResolver", () => {
-	test("resolves the source variant url for a live channel", async () => {
+	test("resolves the source variant url and metadata for a live channel", async () => {
 		const resolver = new TwitchGqlResolver(
 			noopLogger,
 			stubFetch(
@@ -58,9 +82,45 @@ describe("TwitchGqlResolver", () => {
 				textResponse(200, MASTER_PLAYLIST),
 			),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).resolves.toBe(
-			"https://example.ttvnw.net/source.m3u8",
+		await expect(resolver.resolve(channel)).resolves.toEqual({
+			sourceUrl: "https://example.ttvnw.net/source.m3u8",
+			metadata: { title: "playing games", game: "Chess", viewersCount: 1234 },
+		});
+	});
+
+	test("source resolution succeeds even when metadata fetch fails", async () => {
+		const resolver = new TwitchGqlResolver(
+			noopLogger,
+			stubFetch(
+				jsonResponse(200, VALID_TOKEN),
+				textResponse(200, MASTER_PLAYLIST),
+				textResponse(500, "boom"),
+			),
 		);
+		const result = await resolver.resolve(channel);
+		expect(result.sourceUrl).toBe("https://example.ttvnw.net/source.m3u8");
+		expect(result.metadata).toBeUndefined();
+	});
+
+	test("omits metadata fields that are absent (offline-ish stream)", async () => {
+		const resolver = new TwitchGqlResolver(
+			noopLogger,
+			stubFetch(
+				jsonResponse(200, VALID_TOKEN),
+				textResponse(200, MASTER_PLAYLIST),
+				jsonResponse(200, {
+					data: {
+						user: { lastBroadcast: { title: "old title" }, stream: null },
+					},
+				}),
+			),
+		);
+		const result = await resolver.resolve(channel);
+		expect(result.metadata).toEqual({
+			title: "old title",
+			game: undefined,
+			viewersCount: undefined,
+		});
 	});
 
 	test("maps usher 404 'transcode does not exist' to ChannelOfflineError", async () => {
@@ -72,7 +132,7 @@ describe("TwitchGqlResolver", () => {
 			noopLogger,
 			stubFetch(jsonResponse(200, VALID_TOKEN), usher),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).rejects.toBeInstanceOf(
+		await expect(resolver.resolve(channel)).rejects.toBeInstanceOf(
 			ChannelOfflineError,
 		);
 	});
@@ -86,7 +146,7 @@ describe("TwitchGqlResolver", () => {
 			noopLogger,
 			stubFetch(jsonResponse(200, VALID_TOKEN), usher),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).rejects.toBeInstanceOf(
+		await expect(resolver.resolve(channel)).rejects.toBeInstanceOf(
 			ChannelOfflineError,
 		);
 	});
@@ -96,7 +156,7 @@ describe("TwitchGqlResolver", () => {
 			noopLogger,
 			stubFetch(textResponse(403, "forbidden")),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).rejects.toBeInstanceOf(
+		await expect(resolver.resolve(channel)).rejects.toBeInstanceOf(
 			AuthFailureError,
 		);
 	});
@@ -108,7 +168,7 @@ describe("TwitchGqlResolver", () => {
 				jsonResponse(200, { errors: [{ message: "PersistedQueryNotFound" }] }),
 			),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).rejects.toBeInstanceOf(
+		await expect(resolver.resolve(channel)).rejects.toBeInstanceOf(
 			AuthFailureError,
 		);
 	});
@@ -120,7 +180,7 @@ describe("TwitchGqlResolver", () => {
 				jsonResponse(200, { data: { streamPlaybackAccessToken: null } }),
 			),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).rejects.toBeInstanceOf(
+		await expect(resolver.resolve(channel)).rejects.toBeInstanceOf(
 			AuthFailureError,
 		);
 	});
@@ -134,7 +194,7 @@ describe("TwitchGqlResolver", () => {
 			noopLogger,
 			stubFetch(jsonResponse(200, VALID_TOKEN), usher),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).rejects.toBeInstanceOf(
+		await expect(resolver.resolve(channel)).rejects.toBeInstanceOf(
 			AuthFailureError,
 		);
 	});
@@ -145,7 +205,7 @@ describe("TwitchGqlResolver", () => {
 			noopLogger,
 			stubFetch(jsonResponse(200, VALID_TOKEN), usher),
 		);
-		await expect(resolver.resolveSourceUrl(channel)).rejects.toBeInstanceOf(
+		await expect(resolver.resolve(channel)).rejects.toBeInstanceOf(
 			RetrievalError,
 		);
 	});

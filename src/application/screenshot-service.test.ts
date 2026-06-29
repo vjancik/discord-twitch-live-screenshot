@@ -27,12 +27,13 @@ const channel = TwitchChannel.parse("somechannel");
 const IMAGE = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
 function build(overrides: {
-	resolve?: StreamResolver["resolveSourceUrl"];
+	resolve?: StreamResolver["resolve"];
 	grab?: FrameGrabber["grabFrame"];
 }) {
 	const resolver: StreamResolver = {
-		resolveSourceUrl:
-			overrides.resolve ?? mock(async () => "https://example/source.m3u8"),
+		resolve:
+			overrides.resolve ??
+			mock(async () => ({ sourceUrl: "https://example/source.m3u8" })),
 	};
 	const grabber: FrameGrabber = {
 		grabFrame: overrides.grab ?? mock(async () => IMAGE),
@@ -53,6 +54,21 @@ describe("ScreenshotService.capture", () => {
 			status: "ok",
 			image: IMAGE,
 			channel: "somechannel",
+			metadata: undefined,
+		});
+	});
+
+	test("threads resolver metadata onto the ok result", async () => {
+		const { service } = build({
+			resolve: async () => ({
+				sourceUrl: "https://example/source.m3u8",
+				metadata: { title: "hi", game: "Chess", viewersCount: 7 },
+			}),
+		});
+		const result = await service.capture(channel);
+		expect(result).toMatchObject({
+			status: "ok",
+			metadata: { title: "hi", game: "Chess", viewersCount: 7 },
 		});
 	});
 
@@ -95,7 +111,7 @@ describe("ScreenshotService.capture", () => {
 			resolve: async () => {
 				if (fail)
 					throw new AuthFailureError("nope", { stage: "gql", status: 403 });
-				return "https://example/source.m3u8";
+				return { sourceUrl: "https://example/source.m3u8" };
 			},
 		});
 

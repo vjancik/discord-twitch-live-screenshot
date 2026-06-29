@@ -22,6 +22,7 @@ import {
 import type { Logger } from "../../domain/ports";
 import { TwitchChannel } from "../../domain/twitch-channel";
 import { COMMAND_NAME, OPTION_CHANNEL_URL } from "./command";
+import { formatLiveHeadline } from "./live-headline";
 import { extractChannels } from "./url-extractor";
 
 /** Generic, user-facing message shown when retrieval fails for any reason. */
@@ -156,7 +157,14 @@ export class DiscordBot {
 		switch (result.status) {
 			case "ok":
 				await interaction.editReply({
-					content: `📸 **${channel.login}** — live source screenshot`,
+					// Slash reply links the slug: the user typed a URL, not a clickable
+					// message link, so we provide one. formatLiveHeadline wraps it in
+					// <> so Discord doesn't unfurl it into a profile embed.
+					content: formatLiveHeadline(
+						channel.login,
+						result.metadata,
+						channel.url,
+					),
 					files: [toAttachment(channel.login, result.image)],
 				});
 				return;
@@ -265,7 +273,8 @@ export class DiscordBot {
 			case "ok":
 				try {
 					await message.reply({
-						content: `📸 **${result.channel}** is live`,
+						// No link here: the user's original message already carries it.
+						content: formatLiveHeadline(result.channel, result.metadata),
 						files: [toAttachment(result.channel, result.image)],
 						allowedMentions: { repliedUser: false, parse: [] },
 					});

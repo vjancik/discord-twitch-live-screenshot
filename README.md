@@ -8,12 +8,19 @@ It re-implements Twitch's anonymous GraphQL access-token negotiation directly.
 
 - **`/twitch_screenshot channel_url:<string>`** — slash command that captures the
   best-quality frame for a channel and replies with the PNG. The reply is deferred
-  because resolution + ffmpeg can take a few seconds.
+  because resolution + ffmpeg can take a few seconds. The headline shows the
+  channel (as a link) and current stream title, with the category and viewer
+  count on a second line.
 - **Auto-embed** — when a message contains one or more Twitch **channel** URLs (VODs
   and clips are ignored), the bot replies (with mentions suppressed) with a
-  screenshot per distinct live channel. Duplicate links to the same channel are
+  screenshot per distinct live channel. The headline shows the channel and
+  current title (category/viewers below). Duplicate links to the same channel are
   captured once. Offline channels are silently ignored; a live channel whose
   retrieval fails gets a generic error reply (with full detail logged).
+- **Stream metadata** — title, category, and viewer count are fetched alongside
+  the source URL via a second inline GQL query (no `sha256Hash` to maintain),
+  concurrently so it adds ~no latency. Metadata is best-effort: if the fetch
+  fails the screenshot still posts, just without the title/details.
 - **Audit logging** — auth-contract failures are posted to a configured
   `AUDIT_CHANNEL`, as is the first success after a failure (a "recovery").
 - **Embed suppression** (optional, off by default) — Discord auto-unfurls a Twitch
@@ -27,7 +34,9 @@ The pipeline is: channel → signed HLS access token → usher master playlist �
 the `chunked` (source) variant → `ffmpeg` grabs one native-resolution frame as PNG.
 
 1. **Access token** — `POST https://gql.twitch.tv/gql` with Twitch's public web
-   Client-ID and an **inline GraphQL query** (`PlaybackAccessToken_Template`).
+   Client-ID and an **inline GraphQL query** (`PlaybackAccessToken_Template`). In
+   parallel, a second inline query fetches the stream title, category, and viewer
+   count (`user.stream` / `lastBroadcast`) — best-effort, never blocking capture.
 2. **Playlist** — `GET https://usher.ttvnw.net/api/channel/hls/<channel>.m3u8` with
    the signed `token`/`sig`. A `200` returns the master playlist (the channel is
    live); a `404`/`403` with an offline marker means the channel is offline.
