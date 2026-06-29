@@ -16,6 +16,10 @@ It re-implements Twitch's anonymous GraphQL access-token negotiation directly.
   retrieval fails gets a generic error reply (with full detail logged).
 - **Audit logging** — auth-contract failures are posted to a configured
   `AUDIT_CHANNEL`, as is the first success after a failure (a "recovery").
+- **Embed suppression** (optional, off by default) — Discord auto-unfurls a Twitch
+  channel link into a near-useless profile embed. When `SUPPRESS_EMBEDS` is enabled,
+  the bot hides that native embed on the user's message **after** it has posted a
+  screenshot for the message. See [Embed suppression](#embed-suppression) below.
 
 ## How it works
 
@@ -54,6 +58,33 @@ references in `external_projects/`:
 - `external_projects/yt-dlp/yt_dlp/extractor/twitch.py` (`_download_access_token`)
 - `external_projects/streamlink/src/streamlink/plugins/twitch.py` (`TwitchAPI.access_token`)
 
+### Embed suppression
+
+When a user posts a Twitch channel link, Discord auto-unfurls it into a profile
+embed that duplicates information and adds little next to the bot's screenshot.
+Setting `SUPPRESS_EMBEDS=true` (accepts `true`/`false`/`1`/`0`, case-insensitive;
+default `false`) makes the bot hide that native embed.
+
+**What it does:** sets Discord's `SUPPRESS_EMBEDS` flag on the user's message,
+which hides Discord's auto-generated link unfurls on it. This is **all-or-nothing
+per message** — Discord offers no way to suppress a single embed, so if the
+message contains other links, their unfurls are hidden too. Rich embeds a bot
+explicitly attaches are unaffected.
+
+**When it triggers:** only after the bot **successfully posts a screenshot** for
+at least one channel linked in that message. Messages where no screenshot was
+posted (offline-only, or retrieval failed) keep their native embed untouched.
+
+**How it handles timing:** Discord attaches the auto-embed asynchronously, so it
+can arrive before or after the bot's reply. The bot suppresses immediately if the
+embed already exists when the screenshot is posted, otherwise it waits for the
+`messageUpdate` that adds the embed and suppresses then. Per-message tracking is
+evicted after 60s.
+
+**Permission:** requires **Manage Messages** in the channel (editing another
+user's message). Without it the suppress call fails with `50013` (logged) and the
+rest of the bot is unaffected.
+
 ## Prerequisites
 
 - [Bun](https://bun.com)
@@ -68,7 +99,9 @@ cp .env.example .env   # then fill in the values
 ```
 
 Required env vars (see `.env.example`): `DISCORD_TOKEN`, `DISCORD_APP_ID`,
-`AUDIT_CHANNEL`. Bun loads `.env` automatically.
+`AUDIT_CHANNEL`. Optional: `DEV_GUILD_ID`, `LOG_LEVEL`, `FFMPEG_PATH`,
+`SUPPRESS_EMBEDS` (see [Embed suppression](#embed-suppression)). Bun loads `.env`
+automatically.
 
 ### Discord Developer Portal
 
@@ -86,6 +119,10 @@ In the [Developer Portal](https://discord.com/developers/applications):
   - **Send Messages** — to reply
   - **Attach Files** — to upload the screenshot (without this you'll get
     `DiscordAPIError: Missing Permissions`, code `50013`)
+  - **Manage Messages** — *optional*, only needed when `SUPPRESS_EMBEDS` is
+    enabled. Required to edit another user's message to hide its auto-embed.
+    Without it, suppression silently no-ops (logged as code `50013`) and
+    everything else still works.
 
   When generating an invite under **OAuth2 → URL Generator**, select the `bot`
   and `applications.commands` scopes plus the permissions above.

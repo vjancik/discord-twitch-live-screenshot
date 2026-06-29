@@ -9,6 +9,7 @@ import {
 	MessageFlags,
 	Partials,
 } from "discord.js";
+import { EmbedSuppressionTracker } from "../../application/embed-suppression-tracker";
 import { sanitizeForLog } from "../../application/sanitize-for-log";
 import type {
 	CaptureResult,
@@ -57,11 +58,19 @@ function toAttachment(channelLogin: string, image: Buffer): AttachmentBuilder {
  */
 export class DiscordBot {
 	private readonly client: Client;
+	/**
+	 * Coordinates suppression of the native Twitch auto-embed on a user's message
+	 * once we've posted a screenshot for it. Undefined when the feature is off.
+	 */
+	private readonly suppression?: EmbedSuppressionTracker;
 
 	constructor(
 		private readonly service: ScreenshotCapturer,
 		private readonly logger: Logger,
+		/** When true, suppress the native auto-embed after posting a screenshot. */
+		suppressEmbeds = false,
 	) {
+		if (suppressEmbeds) this.suppression = new EmbedSuppressionTracker();
 		this.client = new Client({
 			intents: [
 				GatewayIntentBits.Guilds,
@@ -77,6 +86,11 @@ export class DiscordBot {
 		);
 		this.client.on(Events.InteractionCreate, this.onInteraction.bind(this));
 		this.client.on(Events.MessageCreate, this.onMessage.bind(this));
+		// Discord attaches the native auto-unfurl embed asynchronously, firing a
+		// messageUpdate. Only registered when suppression is enabled.
+		if (this.suppression !== undefined) {
+			this.client.on(Events.MessageUpdate, this.onMessageUpdate.bind(this));
+		}
 		// discord.js can attach raw gateway frames to error payloads (e.g. on a
 		// disallowed-intents handshake); sanitize before logging so a multi-MB
 		// binary buffer can't flood the terminal. Also prevents an unhandled
@@ -165,20 +179,88 @@ export class DiscordBot {
 		const channels = extractChannels(message.content);
 		if (channels.length === 0) return;
 
+		// Begin tracking before any capture so a fast embed-attach (messageUpdate)
+		// that arrives mid-capture is correlated to this message.
+		this.suppression?.track(message.id);
+
 		// Capture all channels concurrently; reply only for those that are live.
 		const results = await Promise.all(
 			channels.map((channel) => this.service.capture(channel)),
 		);
+		let posted = false;
 		for (const result of results) {
-			await this.replyForAutoEmbed(message, result);
+			posted = (await this.replyForAutoEmbed(message, result)) || posted;
+		}
+
+		// We posted a screenshot for at least one channel in this message → the
+		// native auto-embed is now redundant. Suppression is all-or-nothing per
+		// message; the embed may already be attached (suppress now) or arrive
+		// later via messageUpdate.
+		const embedPresent = message.embeds.length > 0;
+		if (
+			posted &&
+			this.suppression?.onScreenshotPosted(message.id, embedPresent) === true
+		) {
+			await this.suppressMessageEmbeds(message);
 		}
 	}
 
-	/** Send (or skip) an auto-embed reply for a single capture result. */
+	/** Suppress an embed on a tracked message once Discord attaches it. */
+	private async onMessageUpdate(
+		_oldMessage: unknown,
+		newMessage: Message | import("discord.js").PartialMessage,
+	): Promise<void> {
+		if (this.suppression === undefined) return;
+
+		try {
+			// messageUpdate fires for many reasons (edits, pins, embed-attach). We
+			// only care about embed-attach, so confirm an embed exists before
+			// claiming the one-shot suppress. On a true partial only the id is
+			// reliable; fetch to read embeds (the common embed-attach case arrives
+			// non-partial). The id is always valid, even on a partial.
+			const full = newMessage.partial ? await newMessage.fetch() : newMessage;
+			if (full.embeds.length === 0) return;
+
+			// Only suppress messages we decided to suppress (a screenshot was
+			// posted) and haven't suppressed yet.
+			if (this.suppression.onEmbedAppeared(full.id) !== true) return;
+			await this.suppressMessageEmbeds(full);
+		} catch (err) {
+			this.logger.error(
+				{ err: describeSendError(err), messageId: newMessage.id },
+				"Failed to suppress embed on messageUpdate",
+			);
+		}
+	}
+
+	/**
+	 * Set the SUPPRESS_EMBEDS flag on a message, hiding all of Discord's
+	 * auto-unfurl embeds (it is all-or-nothing — a single embed cannot be
+	 * targeted). Requires the "Manage Messages" permission; a missing-permission
+	 * error (50013) is logged compactly and otherwise ignored so the screenshot
+	 * reply is unaffected.
+	 */
+	private async suppressMessageEmbeds(message: Message): Promise<void> {
+		try {
+			await message.suppressEmbeds(true);
+			this.suppression?.forget(message.id);
+		} catch (err) {
+			this.logger.error(
+				{ err: describeSendError(err), messageId: message.id },
+				"Failed to suppress message embeds (need Manage Messages?)",
+			);
+		}
+	}
+
+	/**
+	 * Send (or skip) an auto-embed reply for a single capture result.
+	 *
+	 * @returns true if a screenshot was successfully posted.
+	 */
 	private async replyForAutoEmbed(
 		message: Message,
 		result: CaptureResult,
-	): Promise<void> {
+	): Promise<boolean> {
 		switch (result.status) {
 			case "ok":
 				try {
@@ -187,21 +269,22 @@ export class DiscordBot {
 						files: [toAttachment(result.channel, result.image)],
 						allowedMentions: { repliedUser: false, parse: [] },
 					});
+					return true;
 				} catch (err) {
 					this.logger.error(
 						{ err: describeSendError(err), channel: result.channel },
 						"Failed to send auto-embed reply",
 					);
+					return false;
 				}
-				return;
 			case "offline":
 				// Channel not live → do nothing, per spec.
-				return;
+				return false;
 			case "auth_failure":
 				// We can't even determine liveness (Twitch contract broke). Stay
 				// silent on auto-embed to avoid spamming every message during an
 				// outage; the failure is already logged and audited.
-				return;
+				return false;
 			default:
 				// Live but retrieval failed: generic reply, detail already logged/audited.
 				try {
@@ -215,7 +298,7 @@ export class DiscordBot {
 						"Failed to send auto-embed error reply",
 					);
 				}
-				return;
+				return false;
 		}
 	}
 }

@@ -17,6 +17,12 @@ export interface Config {
 	logLevel: string;
 	/** ffmpeg binary path/name. */
 	ffmpegPath: string;
+	/**
+	 * When true, suppress the native auto-unfurl embed on a user's message after
+	 * we successfully post a screenshot for a Twitch channel it links to.
+	 * Requires the bot to have "Manage Messages" in the channel.
+	 */
+	suppressEmbeds: boolean;
 }
 
 function required(name: string): string {
@@ -25,6 +31,23 @@ function required(name: string): string {
 		throw new ConfigError(`Missing required environment variable: ${name}`);
 	}
 	return value.trim();
+}
+
+/**
+ * Parse a boolean env var, accepting `true`/`false`/`1`/`0` case-insensitively.
+ * An unset/blank value yields {@link fallback}; any other value is rejected.
+ *
+ * @throws {ConfigError} when the value is present but not a recognized boolean.
+ */
+function booleanEnv(name: string, fallback: boolean): boolean {
+	const raw = process.env[name]?.trim();
+	if (raw === undefined || raw === "") return fallback;
+	const value = raw.toLowerCase();
+	if (value === "true" || value === "1") return true;
+	if (value === "false" || value === "0") return false;
+	throw new ConfigError(
+		`Invalid boolean for ${name}: "${raw}" (expected true/false/1/0)`,
+	);
 }
 
 /**
@@ -42,5 +65,6 @@ export function loadConfig(): Config {
 		devGuildId: process.env.DEV_GUILD_ID?.trim() || undefined,
 		logLevel: process.env.LOG_LEVEL?.trim() || "info",
 		ffmpegPath: process.env.FFMPEG_PATH?.trim() || "ffmpeg",
+		suppressEmbeds: booleanEnv("SUPPRESS_EMBEDS", false),
 	};
 }

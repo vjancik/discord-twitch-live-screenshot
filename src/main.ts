@@ -45,6 +45,7 @@ async function main(): Promise<void> {
 			},
 		},
 		logger,
+		config.suppressEmbeds,
 	);
 	const audit = new DiscordAuditLogger(
 		bot.discordClient,
