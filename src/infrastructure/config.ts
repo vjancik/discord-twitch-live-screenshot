@@ -23,6 +23,16 @@ export interface Config {
 	 * Requires the bot to have "Manage Messages" in the channel.
 	 */
 	suppressEmbeds: boolean;
+	/**
+	 * Rate-limit window, in seconds, for the per-(Twitch-channel × Discord-channel)
+	 * throttle: at most one capture per channel per room per this many seconds.
+	 */
+	rateLimitPerChannelSeconds: number;
+	/**
+	 * Rate-limit window, in seconds, for the per-user throttle: at most one
+	 * invocation per user (across all channels) per this many seconds.
+	 */
+	rateLimitPerUserSeconds: number;
 }
 
 function required(name: string): string {
@@ -51,6 +61,24 @@ function booleanEnv(name: string, fallback: boolean): boolean {
 }
 
 /**
+ * Parse a positive-integer env var. An unset/blank value yields {@link fallback};
+ * any value that is not a whole number greater than zero is rejected.
+ *
+ * @throws {ConfigError} when the value is present but not a positive integer.
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+	const raw = process.env[name]?.trim();
+	if (raw === undefined || raw === "") return fallback;
+	const value = Number(raw);
+	if (!Number.isInteger(value) || value <= 0) {
+		throw new ConfigError(
+			`Invalid value for ${name}: "${raw}" (expected a positive integer)`,
+		);
+	}
+	return value;
+}
+
+/**
  * Load and validate configuration from the environment.
  *
  * Bun loads `.env` automatically, so no dotenv import is needed.
@@ -66,5 +94,7 @@ export function loadConfig(): Config {
 		logLevel: process.env.LOG_LEVEL?.trim() || "info",
 		ffmpegPath: process.env.FFMPEG_PATH?.trim() || "ffmpeg",
 		suppressEmbeds: booleanEnv("SUPPRESS_EMBEDS", false),
+		rateLimitPerChannelSeconds: positiveIntEnv("RATE_LIMIT_PER_CHANNEL", 60),
+		rateLimitPerUserSeconds: positiveIntEnv("RATE_LIMIT_PER_USER", 60),
 	};
 }

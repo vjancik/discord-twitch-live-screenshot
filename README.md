@@ -26,6 +26,15 @@ It re-implements Twitch's anonymous GraphQL access-token negotiation directly.
   unskippable stitched preroll). If a (rare) mid-roll is nonetheless detected in
   the playlist, the bot reports **"Commercial ad break in progress"** once
   instead of capturing the ad creative — it does not wait or retry.
+- **Rate limiting** — two independent per-invocation throttles guard against
+  frame-spamming: one **per user** (across all channels) and one **per
+  Twitch-channel × Discord-channel**. Both default to one capture per minute,
+  configurable via `RATE_LIMIT_PER_USER` / `RATE_LIMIT_PER_CHANNEL` (seconds).
+  Limiting is per-invocation, not per-screenshot — a message linking N channels
+  is a single user acquisition but N channel acquisitions, so one tripped
+  channel doesn't block the others. A throttled invocation gets a visible reply
+  (ephemeral on the slash command, a normal reply on the auto-embed path), never
+  a silent drop. See [Rate limiting](#rate-limiting) below.
 - **Audit logging** — auth-contract failures are posted to a configured
   `AUDIT_CHANNEL`, as is the first success after a failure (a "recovery").
 - **Embed suppression** (optional, off by default) — Discord auto-unfurls a Twitch
@@ -75,6 +84,41 @@ references in `external_projects/`:
 - `external_projects/yt-dlp/yt_dlp/extractor/twitch.py` (`_download_access_token`)
 - `external_projects/streamlink/src/streamlink/plugins/twitch.py` (`TwitchAPI.access_token`)
 
+### Rate limiting
+
+Two independent fixed-window throttles, both enforced **per invocation** before
+any capture work runs:
+
+- **`RATE_LIMIT_PER_USER`** (default `60` seconds) — at most one invocation per
+  user, counted across every channel they link. Keyed by Discord user id.
+- **`RATE_LIMIT_PER_CHANNEL`** (default `60` seconds) — at most one capture per
+  **Twitch channel per Discord channel**. Keyed by `twitchLogin:discordChannelId`,
+  so the same stream can still be captured concurrently in different rooms.
+
+Both accept a positive integer number of seconds; a non-positive or non-integer
+value is rejected at startup. An invocation must pass **both** limiters to
+proceed.
+
+Because limiting is per-invocation rather than per-screenshot, a single message
+linking several channels consumes **one** user slot but **one channel slot per
+linked channel** — so a channel that's currently throttled is skipped while the
+rest of the message's channels still capture.
+
+A throttled invocation always gets feedback, never a silent failure:
+
+- **Slash command** — an **ephemeral** reply (only the invoker sees it). The
+  limit is checked *before* the reply is deferred, since a deferred reply can't
+  later be made ephemeral.
+- **Auto-embed** — a normal reply on the user's message. The per-user limit is
+  checked once; if it trips, nothing is captured. Otherwise, if one or more
+  linked channels trip the per-channel limit, a single notice is posted and the
+  un-throttled channels still capture.
+
+The limiter is **in-memory**: windows reset on restart and are not shared across
+processes. That's fine for a single-instance bot; running multiple replicas
+would need a shared backing store (the `RateLimiter` port makes that a drop-in
+adapter swap).
+
 ### Embed suppression
 
 When a user posts a Twitch channel link, Discord auto-unfurls it into a profile
@@ -117,8 +161,9 @@ cp .env.example .env   # then fill in the values
 
 Required env vars (see `.env.example`): `DISCORD_TOKEN`, `DISCORD_APP_ID`,
 `AUDIT_CHANNEL`. Optional: `DEV_GUILD_ID`, `LOG_LEVEL`, `FFMPEG_PATH`,
-`SUPPRESS_EMBEDS` (see [Embed suppression](#embed-suppression)). Bun loads `.env`
-automatically.
+`SUPPRESS_EMBEDS` (see [Embed suppression](#embed-suppression)),
+`RATE_LIMIT_PER_USER` / `RATE_LIMIT_PER_CHANNEL` (see
+[Rate limiting](#rate-limiting)). Bun loads `.env` automatically.
 
 ### Discord Developer Portal
 

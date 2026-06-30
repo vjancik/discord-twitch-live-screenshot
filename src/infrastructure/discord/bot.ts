@@ -19,7 +19,7 @@ import {
 	InvalidChannelUrlError,
 	UnsupportedTwitchUrlError,
 } from "../../domain/errors";
-import type { Logger } from "../../domain/ports";
+import type { Logger, RateLimiter } from "../../domain/ports";
 import { TwitchChannel } from "../../domain/twitch-channel";
 import { COMMAND_NAME, OPTION_CHANNEL_URL } from "./command";
 import { formatAdBreakNotice, formatLiveHeadline } from "./live-headline";
@@ -28,6 +28,17 @@ import { extractChannels } from "./url-extractor";
 /** Generic, user-facing message shown when retrieval fails for any reason. */
 const GENERIC_ERROR =
 	"⚠️ Couldn't grab a screenshot for that channel right now.";
+
+/** User-facing message shown when an invocation is rate limited. */
+const RATE_LIMITED = "🛑 You have hit the rate limit, please try again later.";
+
+/** Build the per-(channel × Discord-channel) rate-limit key. */
+function channelRoomKey(
+	channelLogin: string,
+	discordChannelId: string,
+): string {
+	return `${channelLogin}:${discordChannelId}`;
+}
 
 /**
  * Reduce a Discord send/reply failure to a compact, log-safe shape. Avoids
@@ -68,6 +79,15 @@ export class DiscordBot {
 	constructor(
 		private readonly service: ScreenshotCapturer,
 		private readonly logger: Logger,
+		/**
+		 * Per-invocation throttles. `userLimiter` is keyed by the invoking user
+		 * (across all channels); `channelRoomLimiter` is keyed by Twitch-channel ×
+		 * Discord-channel. An invocation must pass BOTH to capture. Per-invocation
+		 * (not per-screenshot): one message linking N channels is a single user
+		 * acquisition but N channel-room acquisitions.
+		 */
+		private readonly userLimiter: RateLimiter,
+		private readonly channelRoomLimiter: RateLimiter,
 		/** When true, suppress the native auto-embed after posting a screenshot. */
 		suppressEmbeds = false,
 	) {
@@ -150,6 +170,27 @@ export class DiscordBot {
 			return;
 		}
 
+		// Enforce both rate limits BEFORE deferring: a deferred reply can't be made
+		// ephemeral after the fact, so the rate-limit notice (which should be
+		// ephemeral) has to be the very first response. One invocation consumes one
+		// unit of each key only if both pass — otherwise neither is consumed.
+		const userKey = interaction.user.id;
+		const roomKey = channelRoomKey(channel.login, interaction.channelId);
+		if (!this.userLimiter.tryAcquire(userKey)) {
+			await interaction.reply({
+				content: RATE_LIMITED,
+				flags: MessageFlags.Ephemeral,
+			});
+			return;
+		}
+		if (!this.channelRoomLimiter.tryAcquire(roomKey)) {
+			await interaction.reply({
+				content: RATE_LIMITED,
+				flags: MessageFlags.Ephemeral,
+			});
+			return;
+		}
+
 		// Retrieval can take several seconds (GQL + usher + ffmpeg), so defer.
 		await interaction.deferReply();
 		const result = await this.service.capture(channel);
@@ -192,13 +233,32 @@ export class DiscordBot {
 		const channels = extractChannels(message.content);
 		if (channels.length === 0) return;
 
+		// User limit is per-invocation (per message), checked once regardless of how
+		// many channels are linked. Deny → a single notice, capture nothing.
+		if (!this.userLimiter.tryAcquire(message.author.id)) {
+			await this.sendRateLimitedReply(message);
+			return;
+		}
+
+		// Each linked channel is throttled independently per Discord channel. A
+		// channel that trips its own limit is skipped; the others still capture.
+		const allowed = channels.filter((channel) =>
+			this.channelRoomLimiter.tryAcquire(
+				channelRoomKey(channel.login, message.channelId),
+			),
+		);
+		if (allowed.length < channels.length) {
+			await this.sendRateLimitedReply(message);
+		}
+		if (allowed.length === 0) return;
+
 		// Begin tracking before any capture so a fast embed-attach (messageUpdate)
 		// that arrives mid-capture is correlated to this message.
 		this.suppression?.track(message.id);
 
 		// Capture all channels concurrently; reply only for those that are live.
 		const results = await Promise.all(
-			channels.map((channel) => this.service.capture(channel)),
+			allowed.map((channel) => this.service.capture(channel)),
 		);
 		let posted = false;
 		for (const result of results) {
@@ -261,6 +321,21 @@ export class DiscordBot {
 			this.logger.error(
 				{ err: describeSendError(err), messageId: message.id },
 				"Failed to suppress message embeds (need Manage Messages?)",
+			);
+		}
+	}
+
+	/** Reply to a message that tripped a rate limit (auto-embed path). */
+	private async sendRateLimitedReply(message: Message): Promise<void> {
+		try {
+			await message.reply({
+				content: RATE_LIMITED,
+				allowedMentions: { repliedUser: false, parse: [] },
+			});
+		} catch (err) {
+			this.logger.error(
+				{ err: describeSendError(err), messageId: message.id },
+				"Failed to send rate-limit reply",
 			);
 		}
 	}

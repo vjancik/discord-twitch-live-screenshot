@@ -5,6 +5,7 @@ import { DiscordAuditLogger } from "./infrastructure/discord/audit-logger";
 import { DiscordBot } from "./infrastructure/discord/bot";
 import { FfmpegFrameGrabber } from "./infrastructure/ffmpeg/frame-grabber";
 import { createLogger } from "./infrastructure/logger";
+import { FixedWindowRateLimiter } from "./infrastructure/rate-limit/fixed-window-rate-limiter";
 import { TwitchGqlResolver } from "./infrastructure/twitch/gql-resolver";
 
 /**
@@ -36,6 +37,14 @@ async function main(): Promise<void> {
 	// by building the bot with a thin forwarding capturer that delegates to the
 	// service once it is constructed.
 	let service: ScreenshotService | undefined;
+	// Per-invocation throttles (windows configurable, default 60s each): one keyed
+	// by user (across all channels), one by Twitch-channel × Discord-channel.
+	const userLimiter = new FixedWindowRateLimiter(
+		config.rateLimitPerUserSeconds * 1000,
+	);
+	const channelRoomLimiter = new FixedWindowRateLimiter(
+		config.rateLimitPerChannelSeconds * 1000,
+	);
 	const bot = new DiscordBot(
 		{
 			capture: (channel) => {
@@ -45,6 +54,8 @@ async function main(): Promise<void> {
 			},
 		},
 		logger,
+		userLimiter,
+		channelRoomLimiter,
 		config.suppressEmbeds,
 	);
 	const audit = new DiscordAuditLogger(

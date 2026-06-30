@@ -44,6 +44,24 @@ export interface StreamResolver {
 	checkAdBreak(sourceUrl: string): Promise<boolean>;
 }
 
+/**
+ * A best-effort, per-key request throttle used to stop a single user (or a
+ * single channel-in-a-room) from spamming captures.
+ *
+ * Keyed by an opaque string the caller composes (e.g. a user id, or a
+ * `channel:guildChannel` pair). Each key has its own independent allowance.
+ */
+export interface RateLimiter {
+	/**
+	 * Attempt to consume one unit of the key's allowance.
+	 *
+	 * @param key opaque rate-limit key.
+	 * @returns true if the call is permitted (and the unit consumed); false if the
+	 *   key has exhausted its allowance for the current window.
+	 */
+	tryAcquire(key: string): boolean;
+}
+
 /** Captures a single frame from an HLS stream URL and returns the encoded image. */
 export interface FrameGrabber {
 	/**
