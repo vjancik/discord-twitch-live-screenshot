@@ -6,17 +6,20 @@ It re-implements Twitch's anonymous GraphQL access-token negotiation directly.
 
 ## Features
 
-- **`/twitch_screenshot channel_url:<string>`** — slash command that captures the
-  best-quality frame for a channel and replies with the PNG. The reply is deferred
-  because resolution + ffmpeg can take a few seconds. The headline shows the
-  channel (as a link) and current stream title, with the category and viewer
-  count on a second line.
+- **`/twitch_screenshot channel_url:<string> [spoiler:<bool>]`** — slash command
+  that captures the best-quality frame for a channel and replies with the PNG.
+  The reply is deferred because resolution + ffmpeg can take a few seconds. The
+  headline shows the channel (as a link) and current stream title, with the
+  category and viewer count on a second line. The optional `spoiler` flag
+  (default false) posts the screenshot spoilered.
 - **Auto-embed** — when a message contains one or more Twitch **channel** URLs (VODs
   and clips are ignored), the bot replies (with mentions suppressed) with a
   screenshot per distinct live channel. The headline shows the channel and
   current title (category/viewers below). Duplicate links to the same channel are
   captured once. Offline channels are silently ignored; a live channel whose
-  retrieval fails gets a generic error reply (with full detail logged).
+  retrieval fails gets a generic error reply (with full detail logged). If the
+  message contains the standalone word `spoiler` (case-insensitive, anywhere in
+  the text), all resulting screenshots are posted spoilered.
 - **Stream metadata** — title, category, and viewer count are fetched alongside
   the source URL via a second inline GQL query (no `sha256Hash` to maintain),
   concurrently so it adds ~no latency. Metadata is best-effort: if the fetch
@@ -35,6 +38,11 @@ It re-implements Twitch's anonymous GraphQL access-token negotiation directly.
   channel doesn't block the others. A throttled invocation gets a visible reply
   (ephemeral on the slash command, a normal reply on the auto-embed path), never
   a silent drop. See [Rate limiting](#rate-limiting) below.
+- **(Un)Spoiler admin command** — a message context menu command (right-click a
+  bot post → Apps → **(Un)Spoiler**) that toggles the spoiler state of the
+  post's attachments after the fact. Admin-only. One attachment toggles
+  immediately; several open a modal asking which (`1,3` or `all`). See
+  [(Un)Spoiler](#unspoiler) below.
 - **Audit logging** — auth-contract failures are posted to a configured
   `AUDIT_CHANNEL`, as is the first success after a failure (a "recovery").
 - **Embed suppression** (optional, off by default) — Discord auto-unfurls a Twitch
@@ -118,6 +126,36 @@ The limiter is **in-memory**: windows reset on restart and are not shared across
 processes. That's fine for a single-instance bot; running multiple replicas
 would need a shared backing store (the `RateLimiter` port makes that a drop-in
 adapter swap).
+
+### (Un)Spoiler
+
+Discord has no mutable "spoiler" flag on attachments — spoilering is the
+`SPOILER_` filename prefix, fixed at upload time. The **(Un)Spoiler** message
+context menu command works around that: the bot edits its own message and
+re-uploads the attachments (discord.js re-downloads each attachment URL
+itself), flipping the prefix on the selected ones. All attachments are rebuilt
+in their original order so the visual grid — and therefore 1-indexed selection —
+stays stable across repeated toggles.
+
+Usage (right-click / long-press a **bot** post → Apps → **(Un)Spoiler**):
+
+- **One attachment** — its spoiler state is toggled immediately.
+- **Several attachments** — a modal asks which to flip: a 1-indexed,
+  comma-separated list (e.g. `1,3`, matching the grid order top-left to
+  bottom-right) or `all` (case-insensitive). Each selected attachment is
+  *toggled* — spoilered ones become visible and vice versa.
+
+Notes:
+
+- **Admin-only**: registered with Administrator default permissions *and*
+  enforced at runtime, so re-exposing it via Integration settings has no effect.
+- Guild-only; it only works on the bot's own messages (Discord forbids editing
+  anyone else's attachments regardless of permissions).
+- Re-uploading assigns new attachment ids/URLs. The old CDN URL keeps working
+  until its signature expires (~24h), so this is "spoiler going forward", not
+  retroactive scrubbing.
+- Feedback is always ephemeral — only the invoking admin sees it.
+- Run `bun run deploy-commands` again after updating to register the command.
 
 ### Embed suppression
 

@@ -1,10 +1,10 @@
 import { REST, Routes } from "discord.js";
 import { loadConfig } from "../config";
 import { createLogger } from "../logger";
-import { twitchScreenshotCommand } from "./command";
+import { twitchScreenshotCommand, unSpoilerCommand } from "./command";
 
 /**
- * Register the application's slash commands with Discord.
+ * Register the application's commands (slash + context menu) with Discord.
  *
  * Run via `bun run deploy-commands`. If `DEV_GUILD_ID` is set, commands are
  * registered to that guild (instant); otherwise they are registered globally
@@ -14,7 +14,7 @@ async function main(): Promise<void> {
 	const config = loadConfig();
 	const logger = createLogger(config.logLevel);
 	const rest = new REST().setToken(config.discordToken);
-	const body = [twitchScreenshotCommand.toJSON()];
+	const body = [twitchScreenshotCommand.toJSON(), unSpoilerCommand.toJSON()];
 
 	const route =
 		config.devGuildId !== undefined

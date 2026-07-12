@@ -5,9 +5,16 @@ import {
 	DiscordAPIError,
 	Events,
 	GatewayIntentBits,
+	LabelBuilder,
 	type Message,
+	type MessageContextMenuCommandInteraction,
 	MessageFlags,
+	ModalBuilder,
+	type ModalSubmitInteraction,
 	Partials,
+	PermissionFlagsBits,
+	TextInputBuilder,
+	TextInputStyle,
 } from "discord.js";
 import { EmbedSuppressionTracker } from "../../application/embed-suppression-tracker";
 import { sanitizeForLog } from "../../application/sanitize-for-log";
@@ -21,7 +28,13 @@ import {
 } from "../../domain/errors";
 import type { Logger, RateLimiter } from "../../domain/ports";
 import { TwitchChannel } from "../../domain/twitch-channel";
-import { COMMAND_NAME, OPTION_CHANNEL_URL } from "./command";
+import { parseAttachmentSelection } from "./attachment-selection";
+import {
+	COMMAND_NAME,
+	OPTION_CHANNEL_URL,
+	OPTION_SPOILER,
+	SPOILER_COMMAND_NAME,
+} from "./command";
 import { formatAdBreakNotice, formatLiveHeadline } from "./live-headline";
 import { extractChannels } from "./url-extractor";
 
@@ -31,6 +44,15 @@ const GENERIC_ERROR =
 
 /** User-facing message shown when an invocation is rate limited. */
 const RATE_LIMITED = "🛑 You have hit the rate limit, please try again later.";
+
+/**
+ * customId prefix for the (Un)Spoiler selection modal; the target message id
+ * is appended so the submit handler can find the message again.
+ */
+const SPOILER_MODAL_PREFIX = "unspoiler:";
+
+/** customId of the index-selection text input inside the (Un)Spoiler modal. */
+const SPOILER_MODAL_INPUT = "unspoiler-selection";
 
 /** Build the per-(channel × Discord-channel) rate-limit key. */
 function channelRoomKey(
@@ -55,9 +77,24 @@ function describeSendError(err: unknown): {
 	return { message: err instanceof Error ? err.message : String(err) };
 }
 
-/** Build a PNG attachment from captured image bytes. */
-function toAttachment(channelLogin: string, image: Buffer): AttachmentBuilder {
-	return new AttachmentBuilder(image, { name: `${channelLogin}.png` });
+/** Build a PNG attachment from captured image bytes, optionally spoilered. */
+function toAttachment(
+	channelLogin: string,
+	image: Buffer,
+	spoiler = false,
+): AttachmentBuilder {
+	return new AttachmentBuilder(image, {
+		name: `${channelLogin}.png`,
+	}).setSpoiler(spoiler);
+}
+
+/**
+ * True when the message text carries the "spoiler" opt-in keyword: any
+ * whitespace-separated token equal to "spoiler" (case-insensitive). Signals
+ * that the screenshots replied to this message should be posted spoilered.
+ */
+function hasSpoilerKeyword(content: string): boolean {
+	return content.split(/\s+/).some((t) => t.toLowerCase() === "spoiler");
 }
 
 /**
@@ -139,19 +176,35 @@ export class DiscordBot {
 		await this.client.destroy();
 	}
 
-	/** Handle the `/twitch_screenshot` slash command. */
+	/** Route incoming interactions to the matching command/modal handler. */
 	private async onInteraction(
 		interaction: import("discord.js").Interaction,
 	): Promise<void> {
-		if (!interaction.isChatInputCommand()) return;
-		if (interaction.commandName !== COMMAND_NAME) return;
-		await this.handleScreenshotCommand(interaction);
+		if (interaction.isChatInputCommand()) {
+			if (interaction.commandName === COMMAND_NAME) {
+				await this.handleScreenshotCommand(interaction);
+			}
+			return;
+		}
+		if (interaction.isMessageContextMenuCommand()) {
+			if (interaction.commandName === SPOILER_COMMAND_NAME) {
+				await this.handleSpoilerCommand(interaction);
+			}
+			return;
+		}
+		if (
+			interaction.isModalSubmit() &&
+			interaction.customId.startsWith(SPOILER_MODAL_PREFIX)
+		) {
+			await this.handleSpoilerModal(interaction);
+		}
 	}
 
 	private async handleScreenshotCommand(
 		interaction: ChatInputCommandInteraction,
 	): Promise<void> {
 		const input = interaction.options.getString(OPTION_CHANNEL_URL, true);
+		const spoiler = interaction.options.getBoolean(OPTION_SPOILER) ?? false;
 
 		let channel: TwitchChannel;
 		try {
@@ -206,7 +259,7 @@ export class DiscordBot {
 						result.metadata,
 						channel.url,
 					),
-					files: [toAttachment(channel.login, result.image)],
+					files: [toAttachment(channel.login, result.image, spoiler)],
 				});
 				return;
 			case "ad":
@@ -225,6 +278,142 @@ export class DiscordBot {
 		}
 	}
 
+	/**
+	 * Handle the "(Un)Spoiler" message context menu command (admin-only).
+	 *
+	 * With a single attachment the spoiler state is toggled immediately; with
+	 * several, a modal asks which 1-indexed attachments to flip (`1,3` or `all`).
+	 */
+	private async handleSpoilerCommand(
+		interaction: MessageContextMenuCommandInteraction,
+	): Promise<void> {
+		// Hard runtime gate on top of the registration-time default permissions:
+		// the default can be re-opened to non-admins per guild via Integration
+		// settings, and this command is meant to stay admin-only.
+		if (
+			interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) !==
+			true
+		) {
+			await interaction.reply({
+				content: "❌ This command is admin-only.",
+				flags: MessageFlags.Ephemeral,
+			});
+			return;
+		}
+
+		const target = interaction.targetMessage;
+		// Attachments can only be replaced on our own messages.
+		if (target.author.id !== interaction.client.user.id) {
+			await interaction.reply({
+				content: "❌ I can only (un)spoiler attachments on my own messages.",
+				flags: MessageFlags.Ephemeral,
+			});
+			return;
+		}
+		const count = target.attachments.size;
+		if (count === 0) {
+			await interaction.reply({
+				content: "❌ That message has no attachments.",
+				flags: MessageFlags.Ephemeral,
+			});
+			return;
+		}
+
+		// One attachment → the selection is unambiguous, toggle right away.
+		if (count === 1) {
+			await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+			await this.flipSpoilers(target, new Set([0]));
+			await interaction.editReply("✅ Toggled the attachment's spoiler.");
+			return;
+		}
+
+		// Several attachments → ask which to flip via a modal text input.
+		const modal = new ModalBuilder()
+			.setCustomId(`${SPOILER_MODAL_PREFIX}${target.id}`)
+			.setTitle("(Un)Spoiler attachments")
+			.addLabelComponents(
+				new LabelBuilder()
+					.setLabel(`Which attachments to flip (1-${count})`)
+					.setDescription(
+						'1-indexed, comma-separated — e.g. "1,3" — or "all" to flip every attachment.',
+					)
+					.setTextInputComponent(
+						new TextInputBuilder()
+							.setCustomId(SPOILER_MODAL_INPUT)
+							.setPlaceholder('e.g. "1,3" or "all"')
+							.setStyle(TextInputStyle.Short)
+							.setRequired(true),
+					),
+			);
+		await interaction.showModal(modal);
+	}
+
+	/** Handle the (Un)Spoiler modal submit: parse the selection and flip. */
+	private async handleSpoilerModal(
+		interaction: ModalSubmitInteraction,
+	): Promise<void> {
+		const messageId = interaction.customId.slice(SPOILER_MODAL_PREFIX.length);
+		const input = interaction.fields.getTextInputValue(SPOILER_MODAL_INPUT);
+		await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+		try {
+			const channel = interaction.channel;
+			if (channel === null || !channel.isTextBased()) {
+				await interaction.editReply("❌ Couldn't access this channel.");
+				return;
+			}
+			// Re-fetch instead of caching the message across the modal round-trip:
+			// it may have been edited or deleted while the modal was open.
+			const message = await channel.messages.fetch(messageId);
+			const selection = parseAttachmentSelection(
+				input,
+				message.attachments.size,
+			);
+			if (!selection.ok) {
+				await interaction.editReply(`❌ ${selection.reason}`);
+				return;
+			}
+			await this.flipSpoilers(message, new Set(selection.indexes));
+			const positions = selection.indexes.map((i) => i + 1).join(", ");
+			await interaction.editReply(
+				`✅ Toggled spoiler on attachment(s) ${positions}.`,
+			);
+		} catch (err) {
+			this.logger.error(
+				{ err: describeSendError(err), messageId },
+				"(Un)Spoiler modal handling failed",
+			);
+			await interaction.editReply(
+				"❌ Couldn't update that message (was it deleted?).",
+			);
+		}
+	}
+
+	/**
+	 * Toggle the spoiler state of the given 0-based attachment indexes on one of
+	 * the bot's own messages.
+	 *
+	 * Discord has no mutable spoiler flag — it is the `SPOILER_` filename
+	 * prefix, fixed at upload time — so flipping means re-uploading. All
+	 * attachments are rebuilt in their original array order (rather than keeping
+	 * the untouched ones), because an edit appends new uploads after kept
+	 * attachments: a partial rebuild would reorder the message's attachment grid
+	 * and break 1-indexed selection for subsequent toggles. discord.js downloads
+	 * each `attachment.url` itself — a URL string is a valid attachment resource.
+	 */
+	private async flipSpoilers(
+		message: Message,
+		indexes: ReadonlySet<number>,
+	): Promise<void> {
+		const files = [...message.attachments.values()].map((attachment, i) =>
+			new AttachmentBuilder(attachment.url, {
+				name: attachment.name,
+				description: attachment.description ?? undefined,
+			}).setSpoiler(indexes.has(i) ? !attachment.spoiler : attachment.spoiler),
+		);
+		await message.edit({ attachments: [], files });
+	}
+
 	/** Auto-embed: detect live Twitch channel URLs in messages and reply with screenshots. */
 	private async onMessage(message: Message): Promise<void> {
 		if (message.author.bot) return;
@@ -232,6 +421,10 @@ export class DiscordBot {
 
 		const channels = extractChannels(message.content);
 		if (channels.length === 0) return;
+
+		// A bare "spoiler" word anywhere in the message opts every resulting
+		// screenshot into being posted spoilered.
+		const spoiler = hasSpoilerKeyword(message.content);
 
 		// User limit is per-invocation (per message), checked once regardless of how
 		// many channels are linked. Deny → a single notice, capture nothing.
@@ -262,7 +455,8 @@ export class DiscordBot {
 		);
 		let posted = false;
 		for (const result of results) {
-			posted = (await this.replyForAutoEmbed(message, result)) || posted;
+			posted =
+				(await this.replyForAutoEmbed(message, result, spoiler)) || posted;
 		}
 
 		// We posted a screenshot for at least one channel in this message → the
@@ -343,11 +537,13 @@ export class DiscordBot {
 	/**
 	 * Send (or skip) an auto-embed reply for a single capture result.
 	 *
+	 * @param spoiler when true, the screenshot attachment is posted spoilered.
 	 * @returns true if a screenshot was successfully posted.
 	 */
 	private async replyForAutoEmbed(
 		message: Message,
 		result: CaptureResult,
+		spoiler: boolean,
 	): Promise<boolean> {
 		switch (result.status) {
 			case "ok":
@@ -355,7 +551,7 @@ export class DiscordBot {
 					await message.reply({
 						// No link here: the user's original message already carries it.
 						content: formatLiveHeadline(result.channel, result.metadata),
-						files: [toAttachment(result.channel, result.image)],
+						files: [toAttachment(result.channel, result.image, spoiler)],
 						allowedMentions: { repliedUser: false, parse: [] },
 					});
 					return true;
